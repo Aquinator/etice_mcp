@@ -1,0 +1,19 @@
+# ── LLM / Agente ─────────────────────────────────────────────────────────────
+langchain-google-genai
+langgraph
+langchain-mcp-adapters
+
+# ── Servidor MCP ──────────────────────────────────────────────────────────────
+fastmcp
+
+# ── Banco de dados ────────────────────────────────────────────────────────────
+sqlalchemy
+pymysql
+cryptography          # driver extra exigido pelo pymysql em algumas configs
+
+# ── API REST ──────────────────────────────────────────────────────────────────
+fastapi
+uvicorn[standard]     # inclui websockets e httptools para melhor performance
+
+# ── Utilitários ───────────────────────────────────────────────────────────────
+python-dotenv
