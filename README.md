@@ -44,8 +44,7 @@ etice_mcp/
 │
 ├── mcp_server/
 │   ├── __init__.py
-│   ├── db.py                    # Pool SQLAlchemy + query()
-│   └── server.py                # 12 tools SQL + log_tool_execution
+│   └── db.py                    # Pool SQLAlchemy + query()
 │
 ├── mcp_client/
 │   ├── __init__.py
@@ -178,24 +177,11 @@ tail -f logs/etice_server.log
 
 ---
 
-## Evoluções futuras
+## A fazer
 
 **Persistência de histórico entre reinicios**
 ```python
 # Em mcp_client/agent.py
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 memory = AsyncSqliteSaver.from_conn_string("checkpoints.db")
-```
-
-**Trocar o LLM**
-```python
-# Em mcp_client/agent.py — tools e API não mudam
-from langchain_anthropic import ChatAnthropic
-llm = ChatAnthropic(model="claude-opus-4-6")
-```
-
-**CORS em produção**
-```python
-# Em api/main.py
-allow_origins=["https://etice.ce.gov.br"]
 ```
