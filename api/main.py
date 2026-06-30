@@ -33,6 +33,8 @@ from api.sessions import SessionRegistry
 from api.routers.health import router as health_router
 from api.routers.sessoes import router as sessoes_router
 from api.routers.chat import router as chat_router
+from api.routers.contratos import router as contratos_router
+from api.routers.ordens_servico import router as ordens_servico_router
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -93,3 +95,5 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(sessoes_router)
 app.include_router(chat_router)
+app.include_router(contratos_router)
+app.include_router(ordens_servico_router)

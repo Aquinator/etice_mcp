@@ -519,6 +519,312 @@ def estatisticas_vigencia() -> str:
     except Exception as exc:
         return f"Erro ao calcular estatísticas de vigência: {exc}"
 
+@mcp.tool()
+@log_tool_execution
+def consultar_saldo_contrato(numero_contrato: str = None, id_contrato: int = None) -> str:
+    """
+    Retorna o saldo disponível de um contrato: valor total menos o que já
+    foi consumido em Ordens de Serviço. Use esta tool sempre que o usuário
+    perguntar sobre saldo, valor restante, quanto ainda pode ser gasto,
+    ou quanto já foi utilizado de um contrato.
+
+    Args:
+        numero_contrato: Número do contrato (ex: "001/2024"). Use este OU id_contrato.
+        id_contrato: ID interno do contrato. Use este OU numero_contrato.
+    """
+    if not numero_contrato and not id_contrato:
+        return "Informe o número do contrato ou o ID para consultar o saldo."
+
+    sql = "SELECT * FROM vw_saldo_contrato WHERE "
+    params = {}
+    if id_contrato:
+        sql += "pk_id_con = :id"
+        params["id"] = id_contrato
+    else:
+        sql += "num_numero_contrato_con = :num"
+        params["num"] = numero_contrato
+
+    try:
+        rows = query(sql, params)
+        if not rows:
+            return "Contrato não encontrado."
+
+        r = rows[0]
+        valor_total = float(r["valor_total_contrato"])
+        consumido   = float(r["valor_total_consumido"])
+        saldo       = float(r["saldo_disponivel"])
+        qtd_os      = r["qtd_ordens_servico"]
+        pct = (consumido / valor_total * 100) if valor_total > 0 else 0
+
+        return (
+            f"Contrato {r['num_numero_contrato_con']} — {r['dsc_empresa_contratada_con']}\n"
+            f"Valor total:      R$ {valor_total:,.2f}\n"
+            f"Valor consumido:  R$ {consumido:,.2f} ({pct:.1f}%)\n"
+            f"Saldo disponível: R$ {saldo:,.2f}\n"
+            f"Ordens de serviço vinculadas: {qtd_os}"
+        )
+    except Exception as exc:
+        return f"Erro ao consultar saldo: {exc}"
+    
+
+@mcp.tool()
+@log_tool_execution
+def consultar_recursos_contrato(
+    numero_contrato: str,
+    unidade_medida: Optional[str] = None,
+) -> str:
+    """
+    Retorna os itens da tabela de preços de um contrato com saldo calculado
+    em quantidade de unidade (UST, UST-A, UST-B, LICENÇA, etc.) e em reais,
+    cruzando com as Ordens de Serviço registradas.
+ 
+    Use quando o usuário perguntar:
+      - "Quantas UST restam no contrato X?"
+      - "Qual o valor unitário da UST-B do contrato 29/2024?"
+      - "Quantas licenças Enterprise Standard foram contratadas?"
+      - "Qual o saldo em unidade do contrato da Golden?"
+ 
+    Args:
+        numero_contrato: Número exato do contrato (ex: "03/2024", "29/2024").
+        unidade_medida:  Filtrar por unidade específica (ex: "UST", "UST-B",
+                         "LICENÇA"). Se omitido, retorna todos os itens.
+    """
+    # 1. Recursos da tabela de preços
+    sql_recursos = """
+        SELECT
+            cre.pk_id_cre,
+            cre.num_seq_recurso_cre            AS seq,
+            cre.dsc_especificacao_recurso_cre  AS especificacao,
+            cre.dsc_chave_recurso_cre          AS chave,
+            cre.dsc_unidade_medida_recurso_cre AS unidade,
+            cre.qtd_quantidade_recurso_cre     AS qtd_contratada,
+            cre.vlr_valor_unitario_recurso_cre AS vlr_unit,
+            cre.vlr_valor_total_recurso_cre    AS vlr_total_cre,
+            con.dsc_empresa_contratada_con     AS empresa
+        FROM tb_contrato_recurso_cre cre
+        JOIN tb_contrato_con con ON con.pk_id_con = cre.pk_id_con
+        WHERE cre.num_numero_contrato_cre = :contrato
+    """
+    params: dict = {"contrato": numero_contrato}
+    if unidade_medida:
+        sql_recursos += " AND cre.dsc_unidade_medida_recurso_cre = :unidade"
+        params["unidade"] = unidade_medida
+    sql_recursos += " ORDER BY cre.num_seq_recurso_cre"
+ 
+    # 2. Consumo real por recurso:
+    #    - Se o recurso tem dsc_chave_recurso_cre → cruzar por LIKE na especificacao da OS
+    #    - Se não tem chave → cruzar pela unidade de medida
+    #    Feito em Python após buscar o consumo bruto por (unidade, especificacao).
+    sql_consumo = """
+        SELECT
+            osi.dsc_unidade_medida_item_os_osi         AS unidade,
+            osi.dsc_especificacao_item_os_osi          AS especificacao,
+            COALESCE(SUM(osi.qtd_quantidade_item_os_osi), 0)  AS qtd_consumida,
+            COALESCE(SUM(osi.vlr_valor_total_item_os_osi), 0) AS vlr_consumido
+        FROM tb_ordem_servico_item_osi osi
+        JOIN tb_ordem_servico_ord ord ON ord.pk_id_ord = osi.pk_id_ord
+        JOIN tb_contrato_con con ON con.pk_id_con = ord.pk_id_con
+        WHERE con.num_numero_contrato_con = :contrato
+          AND COALESCE(ord.log_status_ord, 'ativo') != 'cancelado'
+        GROUP BY osi.dsc_unidade_medida_item_os_osi, osi.dsc_especificacao_item_os_osi
+    """
+ 
+    recursos = query(sql_recursos, params)
+    consumos = query(sql_consumo, {"contrato": numero_contrato})
+ 
+    if not recursos:
+        motivo = f"unidade '{unidade_medida}'" if unidade_medida else "nenhum item"
+        return (
+            f"Nenhum recurso encontrado para o contrato '{numero_contrato}' "
+            f"({motivo}). Verifique se a migration 005 foi aplicada."
+        )
+ 
+    # Índice de consumo: lista de (unidade, especificacao, qtd, vlr)
+    consumo_bruto = [
+        {
+            "unidade":     c["unidade"],
+            "especificacao": (c["especificacao"] or ""),
+            "qtd":         float(c["qtd_consumida"]),
+            "vlr":         float(c["vlr_consumido"]),
+        }
+        for c in consumos
+    ]
+ 
+    def calcular_consumo(recurso: dict) -> tuple[float, float]:
+        """
+        Retorna (qtd_consumida, vlr_consumido) para um recurso.
+        Se tem chave → soma os itens de OS cuja especificacao contenha a chave.
+        Se não tem chave → soma os itens de OS com mesma unidade.
+        """
+        chave = recurso["chave"]
+        unidade = recurso["unidade"]
+        qtd_total = 0.0
+        vlr_total = 0.0
+        for c in consumo_bruto:
+            if chave:
+                # cruzamento preciso: unidade E chave dentro da especificacao da OS
+                if c["unidade"] == unidade and chave in c["especificacao"]:
+                    qtd_total += c["qtd"]
+                    vlr_total += c["vlr"]
+            else:
+                # cruzamento simples: apenas unidade
+                if c["unidade"] == unidade:
+                    qtd_total += c["qtd"]
+                    vlr_total += c["vlr"]
+        return qtd_total, vlr_total
+ 
+    empresa = recursos[0]["empresa"]
+    linhas = [f"=== RECURSOS DO CONTRATO {numero_contrato} — {empresa} ==="]
+ 
+    total_vlr_contratado = 0.0
+    total_vlr_consumido  = 0.0
+    total_vlr_saldo      = 0.0
+ 
+    for r in recursos:
+        qtd_c       = float(r["qtd_contratada"])
+        vlr_unit    = float(r["vlr_unit"])
+        vlr_total_c = float(r["vlr_total_cre"])
+        qtd_cons, vlr_cons = calcular_consumo(r)
+        qtd_saldo   = qtd_c - qtd_cons
+        vlr_saldo   = vlr_total_c - vlr_cons
+        pct         = (qtd_cons / qtd_c * 100) if qtd_c else 0.0
+ 
+        total_vlr_contratado += vlr_total_c
+        total_vlr_consumido  += vlr_cons
+        total_vlr_saldo      += vlr_saldo
+ 
+        desc = (r["especificacao"] or "")
+        desc_curta = desc[:75] + "..." if len(desc) > 75 else desc
+ 
+        linhas.append(
+            f"\n[{r['seq']}] {desc_curta}\n"
+            f"    Unidade:           {r['unidade']}\n"
+            f"    Qtd Contratada:    {qtd_c:>12,.2f}\n"
+            f"    Valor Unitário R$: {vlr_unit:>12,.2f}\n"
+            f"    Qtd Consumida:     {qtd_cons:>12,.2f}\n"
+            f"    Saldo Qtd:         {qtd_saldo:>12,.2f}\n"
+            f"    Saldo R$:          {vlr_saldo:>16,.2f}\n"
+            f"    % Uso:             {pct:.1f}%"
+        )
+ 
+    linhas.append(
+        f"\n{'─'*55}\n"
+        f"TOTAL: Contratado R$ {total_vlr_contratado:,.2f} | "
+        f"Consumido R$ {total_vlr_consumido:,.2f} | "
+        f"Saldo R$ {total_vlr_saldo:,.2f}"
+    )
+ 
+    if numero_contrato == "21/2021":
+        linhas.append(
+            "\n⚠ Contrato 21/2021 (ELOGROUP): tabela de preços não inserida. "
+            "Execute o INSERT em tb_contrato_recurso_cre quando o PDF estiver disponível."
+        )
+ 
+    return "\n".join(linhas)
+
+
+@mcp.tool()
+@log_tool_execution
+def listar_ordens_servico_contrato(
+    numero_contrato: str,
+    incluir_itens: bool = True,
+) -> str:
+    """
+    Lista todas as Ordens de Serviço (OS) emitidas para um contrato específico,
+    com seus itens e valores. Use quando o usuário perguntar:
+      - "Quais ordens de serviço o contrato 03/2024 tem?"
+      - "Liste as OS do contrato da PORTFOLIO"
+      - "Quais os itens da OS 12/2026?"
+      - "Quantas OS foram emitidas para o contrato 21/2021?"
+
+    Args:
+        numero_contrato: Número exato do contrato (ex: "03/2024", "29/2024").
+        incluir_itens:   Se True (padrão), detalha os itens de cada OS.
+                         Se False, retorna apenas o resumo das OS (mais rápido
+                         para contratos com muitas OS).
+    """
+    sql_os = """
+        SELECT
+            ord.pk_id_ord,
+            ord.num_numero_os_ord,
+            ord.dat_emissao_os_ord,
+            ord.nom_cliente_os_ord,
+            ord.nom_fornecedor_os_ord,
+            ord.log_status_ord,
+            con.dsc_empresa_contratada_con AS empresa
+        FROM tb_ordem_servico_ord ord
+        JOIN tb_contrato_con con ON con.pk_id_con = ord.pk_id_con
+        WHERE con.num_numero_contrato_con = :contrato
+        ORDER BY ord.pk_id_ord
+    """
+    ordens = query(sql_os, {"contrato": numero_contrato})
+
+    if not ordens:
+        return (
+            f"Nenhuma Ordem de Serviço encontrada para o contrato '{numero_contrato}'. "
+            f"Verifique se o número do contrato está correto ou se já existem OS cadastradas."
+        )
+
+    empresa = ordens[0]["empresa"]
+    ids_ord = [str(o["pk_id_ord"]) for o in ordens]
+
+    itens_por_os: dict[int, list] = {}
+    if incluir_itens:
+        sql_itens = f"""
+            SELECT
+                osi.pk_id_ord,
+                osi.num_seq_item_os_osi,
+                osi.dsc_especificacao_item_os_osi,
+                osi.dsc_unidade_medida_item_os_osi,
+                osi.qtd_quantidade_item_os_osi,
+                osi.vlr_valor_unitario_item_os_osi,
+                osi.vlr_valor_total_item_os_osi
+            FROM tb_ordem_servico_item_osi osi
+            WHERE osi.pk_id_ord IN ({','.join(ids_ord)})
+            ORDER BY osi.pk_id_ord, osi.num_seq_item_os_osi
+        """
+        itens = query(sql_itens, {})
+        for it in itens:
+            itens_por_os.setdefault(it["pk_id_ord"], []).append(it)
+
+    linhas = [f"=== ORDENS DE SERVIÇO DO CONTRATO {numero_contrato} — {empresa} ==="]
+    total_geral = 0.0
+
+    for o in ordens:
+        itens_desta_os = itens_por_os.get(o["pk_id_ord"], [])
+        total_os = sum(float(i["vlr_valor_total_item_os_osi"]) for i in itens_desta_os)
+        total_geral += total_os
+
+        emissao = o["dat_emissao_os_ord"] or "não informada"
+        status = o["log_status_ord"] or "ativo"
+
+        linhas.append(
+            f"\nOS {o['num_numero_os_ord']} (id={o['pk_id_ord']}) | "
+            f"Status: {status} | Emissão: {emissao} | Total: R$ {total_os:,.2f}"
+        )
+
+        if incluir_itens:
+            if itens_desta_os:
+                for it in itens_desta_os:
+                    desc = (it["dsc_especificacao_item_os_osi"] or "")
+                    desc_curta = desc[:70] + "..." if len(desc) > 70 else desc
+                    linhas.append(
+                        f"    [{it['num_seq_item_os_osi']}] {desc_curta}\n"
+                        f"        {it['dsc_unidade_medida_item_os_osi']} × "
+                        f"{float(it['qtd_quantidade_item_os_osi']):,.2f} × "
+                        f"R$ {float(it['vlr_valor_unitario_item_os_osi']):,.2f} = "
+                        f"R$ {float(it['vlr_valor_total_item_os_osi']):,.2f}"
+                    )
+            else:
+                linhas.append("    (sem itens cadastrados)")
+
+    linhas.append(
+        f"\n{'─'*55}\n"
+        f"Total de OS: {len(ordens)} | Valor total consumido: R$ {total_geral:,.2f}"
+    )
+
+    return "\n".join(linhas)
+
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 

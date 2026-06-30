@@ -17,3 +17,6 @@ uvicorn[standard]     # inclui websockets e httptools para melhor performance
 
 # ── Utilitários ───────────────────────────────────────────────────────────────
 python-dotenv
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+slowapi

@@ -1,0 +1,1 @@
+SELECT * FROM vw_saldo_contrato WHERE pk_id_con IN (2, 3)
